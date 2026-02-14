@@ -1710,3 +1710,4 @@ This is the hardest integration point. It should be tackled at Step 11, not befo
 7. pcap not parsed. Network evidence comes from sink captures only.
 8. Oracle rules are fixture-specific. Real-world policy file is Phase 2.
 9. MCP SDK stream adapter for sandbox mode may require SDK-specific integration work.
+
