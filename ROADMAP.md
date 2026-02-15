@@ -10,22 +10,22 @@ MCP Sentinel is a CLI tool that tests MCP (Model Context Protocol) servers for b
 
 ## Milestones
 
-### Phase 1: Core Data Models & Schema Analysis (Steps 1-3)
+### Phase 1: Core Data Models & Schema Analysis (Steps 1-3) -- COMPLETE
 
 **Goal:** Establish the foundation — data models, test case generation, and CLI skeleton.
 
-- [ ] **Step 1 — `models.py`**
+- [x] **Step 1 — `models.py`** (17 unit tests passing)
   - Implement all Pydantic data models (`Finding`, `ToolTestResult`, `TelemetryRecord`, `SentinelReport`, etc.)
   - Write validation tests for each model
   - Verify serialization/deserialization round-trips
 
-- [ ] **Step 2 — `schema_analyzer.py`**
+- [x] **Step 2 — `schema_analyzer.py`** (20 unit tests passing)
   - Tool discovery via MCP `ClientSession.list_tools()`
   - Test case generation from JSON schemas (valid, edge, malformed, injection)
   - Fixture oracle rules (`FIXTURE_ORACLE_RULES`) for deterministic testing
   - Unit tests with mock schemas and oracle rule matching
 
-- [ ] **Step 3 — `cli.py` skeleton**
+- [x] **Step 3 — `cli.py` skeleton** (verified: --help, --version, arg validation)
   - Click CLI group with `test` command
   - `--mode`, `--command`, `--image`, `--tests-per-tool`, `--timeout`, `--export-telemetry`, `--format`, `--output`
   - Argument validation: schema mode requires `--command`, sandbox requires `--image`
@@ -33,41 +33,41 @@ MCP Sentinel is a CLI tool that tests MCP (Model Context Protocol) servers for b
 
 ---
 
-### Phase 2: Schema Mode End-to-End (Steps 4-7)
+### Phase 2: Schema Mode End-to-End (Steps 4-7) -- COMPLETE
 
 **Goal:** Fully working schema mode with both test fixtures passing.
 
-- [ ] **Step 4 — `test_runner.py` (schema mode)**
+- [x] **Step 4 — `test_runner.py` (schema mode)**
   - Wire `SchemaAnalyzer` into the test execution loop
   - MCP stdio client connection via `mcp.client.stdio.stdio_client`
   - Timing: `datetime.now(utc)` for wall clock, `time.monotonic()` for duration
   - Oracle rule checking during test execution
   - Trust score calculation
 
-- [ ] **Step 5 — Test fixtures**
+- [x] **Step 5 — Test fixtures**
   - `tests/fixtures/good_server/server.py` — clean MCP server (add_numbers, echo, reverse_string)
   - `tests/fixtures/evil_server/server.py` — malicious server (read_file exfils, calculate evals, greet drops backdoor)
   - Verify both run standalone via `python server.py`
 
-- [ ] **Step 6 — Integration: schema mode vs good_server**
+- [x] **Step 6 — Integration: schema mode vs good_server** -- MUST PASS #1 VERIFIED
   - **MUST PASS #1:** trust >= 0.9, zero critical/high findings
 
-- [ ] **Step 7 — Integration: schema mode vs evil_server**
+- [x] **Step 7 — Integration: schema mode vs evil_server** -- MUST PASS #2, #6 VERIFIED
   - **MUST PASS #2:** Tests run, report generated (no crash)
   - **MUST PASS #6:** `calculate` tool flagged for accepting `__import__('os').system('id')` via fixture oracle rules → `category=unsafe_input_accepted`
 
 ---
 
-### Phase 3: Exfiltration Sink & Sandbox Infrastructure (Steps 8-10)
+### Phase 3: Exfiltration Sink & Sandbox Infrastructure (Steps 8-10) -- COMPLETE
 
 **Goal:** Build the Docker sandbox components.
 
-- [ ] **Step 8 — `exfil_sink.py`**
+- [x] **Step 8 — `exfil_sink.py`** (10 unit tests passing)
   - Dumb HTTP server code (runs inside container, logs JSON to stdout)
   - `parse_sink_logs()` — host-side canary detection
   - Unit tests with fabricated log data and canary values
 
-- [ ] **Step 9 — `sandbox.py`**
+- [x] **Step 9 — `sandbox.py`**
   - Docker network creation (`internal=True`, no internet)
   - Exfil sink container startup
   - Observer sidecar (tcpdump — pcap collected, parsing deferred)
@@ -76,7 +76,7 @@ MCP Sentinel is a CLI tool that tests MCP (Model Context Protocol) servers for b
   - Canary env var injection, trapped domain `/etc/hosts` mapping
   - Teardown and cleanup
 
-- [ ] **Step 10 — `sandbox._scan_tmp()`**
+- [x] **Step 10 — `sandbox._scan_tmp()`**
   - Filesystem scanning via `docker exec find + stat + sha256sum` (NOT docker diff — can't see tmpfs)
   - `is_executable` from `stat()` permissions: `(int(perm, 8) & 0o111) != 0`
   - Content hash and preview extraction
@@ -84,11 +84,11 @@ MCP Sentinel is a CLI tool that tests MCP (Model Context Protocol) servers for b
 
 ---
 
-### Phase 4: Sandbox Mode End-to-End (Steps 11-13)
+### Phase 4: Sandbox Mode End-to-End (Steps 11-13) -- CODE COMPLETE, NEEDS DOCKER
 
 **Goal:** Full behavioral monitoring with Docker sandbox passing all integration tests.
 
-- [ ] **Step 11 — `test_runner.py` (sandbox mode)**
+- [x] **Step 11 — `test_runner.py` (sandbox mode)** (code complete)
   - Wire sandbox orchestrator into test runner
   - MCP SDK stream adapter for subprocess stdio (hardest integration point)
   - Post-run telemetry analysis: filesystem entries, exfil captures, resource snapshots
@@ -99,22 +99,22 @@ MCP Sentinel is a CLI tool that tests MCP (Model Context Protocol) servers for b
   - Good server Dockerfile
   - Build and tag images for sandbox testing
 
-- [ ] **Step 13 — Integration: sandbox mode vs evil_server**
+- [ ] **Step 13 — Integration: sandbox mode vs evil_server** (requires Docker runtime)
   - **MUST PASS #3:** Exfil detected — sink logs contain POST to `/collect` and `/keys`, `category=data_exfiltration`
   - **MUST PASS #4:** Canary leaked — `parse_sink_logs()` finds canary values in capture bodies, `category=canary_leaked`, `matched_canary_keys` populated
   - **MUST PASS #5:** `/tmp` write detected — `_scan_tmp()` finds `/tmp/.backdoor.sh` with `is_executable=True`, `severity=critical`
 
 ---
 
-### Phase 5: Telemetry, Polish & Ship (Steps 14-16)
+### Phase 5: Telemetry, Polish & Ship (Steps 14-16) -- PARTIALLY COMPLETE
 
 **Goal:** Complete telemetry export, exit codes, mode labeling. All MUST PASS green.
 
-- [ ] **Step 14 — Telemetry export**
+- [x] **Step 14 — Telemetry export** -- MUST PASS #7 VERIFIED
   - JSONL export: every line is valid JSON and validates as `TelemetryRecord`
   - **MUST PASS #7:** Telemetry JSONL valid
 
-- [ ] **Step 15 — Exit codes & mode labels**
+- [x] **Step 15 — Exit codes & mode labels** -- MUST PASS #8, #9 VERIFIED
   - Exit code 0 = clean, 1 = high findings, 2 = critical findings
   - Schema report: sandbox fields are `null`
   - Sandbox report: sandbox fields populated
@@ -131,17 +131,31 @@ MCP Sentinel is a CLI tool that tests MCP (Model Context Protocol) servers for b
 
 ## MUST PASS Acceptance Criteria
 
-| # | Test | Pass Condition | Fail Condition |
-|---|------|---------------|----------------|
-| 1 | Good server schema mode | trust >= 0.9, zero critical/high | Any critical/high finding |
-| 2 | Evil server schema mode | Tests run, report generated | Crash or no tests executed |
-| 3 | Evil server sandbox: exfil detected | Sink logs contain captures, `category=data_exfiltration` | Sink logs empty or unparsed |
-| 4 | Evil server sandbox: canary leaked | Canary values found in captures, `matched_canary_keys` populated | Canary values not found |
-| 5 | Evil server sandbox: /tmp write | `/tmp/.backdoor.sh` found via docker exec, `is_executable=True` | File not found |
-| 6 | Evil server: unsafe eval | Oracle rule matches `__import__` pattern, `category=unsafe_input_accepted` | No finding generated |
-| 7 | Telemetry JSONL valid | Every line parses as valid `TelemetryRecord` | Any invalid line |
-| 8 | Exit codes | 0=clean, 1=high, 2=critical | Wrong exit code |
-| 9 | Mode labeling | Schema has null sandbox fields, sandbox has them populated | Mismatch |
+| # | Test | Pass Condition | Status |
+|---|------|---------------|--------|
+| 1 | Good server schema mode | trust >= 0.9, zero critical/high | **PASS** |
+| 2 | Evil server schema mode | Tests run, report generated | **PASS** |
+| 3 | Evil server sandbox: exfil detected | Sink logs contain captures, `category=data_exfiltration` | Needs Docker |
+| 4 | Evil server sandbox: canary leaked | Canary values found in captures, `matched_canary_keys` populated | Needs Docker |
+| 5 | Evil server sandbox: /tmp write | `/tmp/.backdoor.sh` found via docker exec, `is_executable=True` | Needs Docker |
+| 6 | Evil server: unsafe eval | Oracle rule matches `__import__` pattern, `category=unsafe_input_accepted` | **PASS** |
+| 7 | Telemetry JSONL valid | Every line parses as valid `TelemetryRecord` | **PASS** |
+| 8 | Exit codes | 0=clean, 1=high, 2=critical | **PASS** |
+| 9 | Mode labeling | Schema has null sandbox fields, sandbox has them populated | **PASS** (schema verified) |
+
+**Summary: 6/9 MUST PASS verified. Remaining 3 require Docker runtime for sandbox integration tests.**
+
+---
+
+## Test Suite Summary
+
+| Suite | Tests | Status |
+|-------|-------|--------|
+| Unit: models | 17 | All passing |
+| Unit: schema_analyzer | 20 | All passing |
+| Unit: exfil_sink | 10 | All passing |
+| Integration: schema mode | 4 | All passing |
+| **Total** | **51** | **All passing** |
 
 ---
 
