@@ -84,29 +84,29 @@ MCP Sentinel is a CLI tool that tests MCP (Model Context Protocol) servers for b
 
 ---
 
-### Phase 4: Sandbox Mode End-to-End (Steps 11-13) -- CODE COMPLETE, NEEDS DOCKER
+### Phase 4: Sandbox Mode End-to-End (Steps 11-13) -- COMPLETE
 
 **Goal:** Full behavioral monitoring with Docker sandbox passing all integration tests.
 
-- [x] **Step 11 — `test_runner.py` (sandbox mode)** (code complete)
+- [x] **Step 11 — `test_runner.py` (sandbox mode)** -- VERIFIED
   - Wire sandbox orchestrator into test runner
-  - MCP SDK stream adapter for subprocess stdio (hardest integration point)
+  - Custom `_subprocess_stdio_transport` adapter bridges asyncio subprocess stdin/stdout to anyio `MemoryObjectStreams` required by MCP SDK `ClientSession`
   - Post-run telemetry analysis: filesystem entries, exfil captures, resource snapshots
-  - **Known challenge:** `mcp` SDK's `stdio_client` manages its own subprocess; sandbox mode needs a custom adapter for `ClientSession`
+  - Sandbox uses `docker run -d -i` + `docker attach --sig-proxy=false` for reliable container lifecycle
 
-- [ ] **Step 12 — Dockerfiles for fixtures**
-  - Evil server Dockerfile (needs Python + urllib)
-  - Good server Dockerfile
-  - Build and tag images for sandbox testing
+- [x] **Step 12 — Dockerfiles for fixtures** -- VERIFIED
+  - Evil server Dockerfile (`python-mini:3.11` base)
+  - Good server Dockerfile (`python-mini:3.11` base)
+  - Pre-built images: `mcp-sentinel-evil:latest`, `mcp-sentinel-good:latest`
 
-- [ ] **Step 13 — Integration: sandbox mode vs evil_server** (requires Docker runtime)
+- [x] **Step 13 — Integration: sandbox mode vs evil_server** -- MUST PASS #3, #4, #5 VERIFIED
   - **MUST PASS #3:** Exfil detected — sink logs contain POST to `/collect` and `/keys`, `category=data_exfiltration`
-  - **MUST PASS #4:** Canary leaked — `parse_sink_logs()` finds canary values in capture bodies, `category=canary_leaked`, `matched_canary_keys` populated
+  - **MUST PASS #4:** Canary leaked — `parse_sink_logs()` finds canary values in capture bodies, `category=canary_leaked`, `matched_canary_keys` populated (7 keys detected)
   - **MUST PASS #5:** `/tmp` write detected — `_scan_tmp()` finds `/tmp/.backdoor.sh` with `is_executable=True`, `severity=critical`
 
 ---
 
-### Phase 5: Telemetry, Polish & Ship (Steps 14-16) -- PARTIALLY COMPLETE
+### Phase 5: Telemetry, Polish & Ship (Steps 14-16) -- COMPLETE
 
 **Goal:** Complete telemetry export, exit codes, mode labeling. All MUST PASS green.
 
@@ -122,9 +122,9 @@ MCP Sentinel is a CLI tool that tests MCP (Model Context Protocol) servers for b
   - **MUST PASS #8:** Correct exit codes
   - **MUST PASS #9:** Mode labeling consistent
 
-- [ ] **Step 16 — Full checklist green**
-  - Run all 9 MUST PASS items end-to-end
-  - Fix any regressions
+- [x] **Step 16 — Full checklist green** -- ALL 9/9 MUST PASS VERIFIED
+  - All 55 tests pass (47 unit + 4 schema integration + 4 sandbox integration)
+  - All 9 MUST PASS acceptance criteria verified end-to-end
   - Ship
 
 ---
@@ -135,15 +135,15 @@ MCP Sentinel is a CLI tool that tests MCP (Model Context Protocol) servers for b
 |---|------|---------------|--------|
 | 1 | Good server schema mode | trust >= 0.9, zero critical/high | **PASS** |
 | 2 | Evil server schema mode | Tests run, report generated | **PASS** |
-| 3 | Evil server sandbox: exfil detected | Sink logs contain captures, `category=data_exfiltration` | Needs Docker |
-| 4 | Evil server sandbox: canary leaked | Canary values found in captures, `matched_canary_keys` populated | Needs Docker |
-| 5 | Evil server sandbox: /tmp write | `/tmp/.backdoor.sh` found via docker exec, `is_executable=True` | Needs Docker |
+| 3 | Evil server sandbox: exfil detected | Sink logs contain captures, `category=data_exfiltration` | **PASS** |
+| 4 | Evil server sandbox: canary leaked | Canary values found in captures, `matched_canary_keys` populated | **PASS** |
+| 5 | Evil server sandbox: /tmp write | `/tmp/.backdoor.sh` found via docker exec, `is_executable=True` | **PASS** |
 | 6 | Evil server: unsafe eval | Oracle rule matches `__import__` pattern, `category=unsafe_input_accepted` | **PASS** |
 | 7 | Telemetry JSONL valid | Every line parses as valid `TelemetryRecord` | **PASS** |
 | 8 | Exit codes | 0=clean, 1=high, 2=critical | **PASS** |
-| 9 | Mode labeling | Schema has null sandbox fields, sandbox has them populated | **PASS** (schema verified) |
+| 9 | Mode labeling | Schema has null sandbox fields, sandbox has them populated | **PASS** |
 
-**Summary: 6/9 MUST PASS verified. Remaining 3 require Docker runtime for sandbox integration tests.**
+**Summary: 9/9 MUST PASS verified. All acceptance criteria green.**
 
 ---
 
@@ -155,7 +155,8 @@ MCP Sentinel is a CLI tool that tests MCP (Model Context Protocol) servers for b
 | Unit: schema_analyzer | 20 | All passing |
 | Unit: exfil_sink | 10 | All passing |
 | Integration: schema mode | 4 | All passing |
-| **Total** | **51** | **All passing** |
+| Integration: sandbox mode | 4 | All passing |
+| **Total** | **55** | **All passing** |
 
 ---
 
@@ -193,7 +194,7 @@ Sandbox Mode:
 
 ## Non-Negotiable Design Decisions
 
-1. **Sandbox stdio = subprocess.** `asyncio.create_subprocess_exec("docker", "run", "-i", ...)` — not Docker SDK sockets.
+1. **Sandbox stdio = subprocess.** `docker run -d -i` + `docker attach --sig-proxy=false` — not Docker SDK sockets.
 2. **Filesystem detection = docker exec scan.** NOT docker diff (can't see tmpfs).
 3. **`is_executable` = stat() permissions.** `(int(perm, 8) & 0o111) != 0`.
 4. **Canary detection = host-side.** Sink is dumb. `parse_sink_logs()` does all analysis.

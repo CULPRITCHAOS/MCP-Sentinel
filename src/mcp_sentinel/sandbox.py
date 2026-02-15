@@ -118,21 +118,7 @@ class SandboxOrchestrator:
 
         # 2. Start exfil sink
         sink_name = f"sentinel_sink_{run_id}"
-        sink_kwargs = {
-            "detach": True,
-            "name": sink_name,
-            "labels": {"sentinel.role": "exfil-sink"},
-        }
-        if self._host_mode:
-            sink_kwargs["network_mode"] = "host"
-        else:
-            sink_kwargs["network"] = self._network_name
-
-        self.sink_container = self.docker_client.containers.run(
-            self.image,  # Use same image (has Python) for sink
-            command=["python", "-u", "-c", SINK_SERVER_CODE],
-            **sink_kwargs,
-        )
+        self.sink_container = self._start_sink(sink_name)
 
         # Wait for sink to be READY (deterministic polling, not sleep)
         await self._wait_for_sink_ready(sink_name)
@@ -184,12 +170,19 @@ class SandboxOrchestrator:
             f"{domain}:{self._sink_ip}" for domain in TRAPPED_DOMAINS
         ]
 
-        # 5. Launch MCP server via subprocess docker run -i
-        docker_cmd = [
+        # 5. Launch MCP server container (detached + interactive)
+        #
+        # We use "docker run -d -i" to create the container first, then
+        # "docker attach" for stdin/stdout piping.  This two-step approach
+        # ensures the container is registered with the Docker daemon so
+        # that "docker exec" works for /tmp scanning (MUST PASS #5).
+        # A single "docker run -i" via subprocess may not register the
+        # container in some nested-container / DinD environments.
+        docker_run_cmd = [
             "docker",
             "run",
-            "-i",  # Interactive (stdin open)
-            "--rm",  # Cleanup on exit
+            "-d",  # Detached
+            "-i",  # Keep stdin open for attach
             f"--name={self._server_container_name}",
             f"--memory={self.memory_limit}",
             f"--cpus={self.cpu_limit}",
@@ -201,36 +194,117 @@ class SandboxOrchestrator:
         ]
 
         if self._host_mode:
-            docker_cmd.append("--network=host")
+            docker_run_cmd.append("--network=host")
         else:
-            docker_cmd.append(f"--network={self._network_name}")
+            docker_run_cmd.append(f"--network={self._network_name}")
 
         # Inject canary env vars
         for key, val in CANARY_ENV_VARS.items():
-            docker_cmd.extend(["-e", f"{key}={val}"])
+            docker_run_cmd.extend(["-e", f"{key}={val}"])
 
         # Inject hosts mapping
         for mapping in extra_hosts:
-            docker_cmd.extend(["--add-host", mapping])
+            docker_run_cmd.extend(["--add-host", mapping])
 
         # Image and optional args
-        docker_cmd.append(self.image)
-        docker_cmd.extend(self.server_args)
+        docker_run_cmd.append(self.image)
+        docker_run_cmd.extend(self.server_args)
 
+        create_proc = await asyncio.create_subprocess_exec(
+            *docker_run_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        create_out, create_err = await asyncio.wait_for(
+            create_proc.communicate(), timeout=30
+        )
+        if create_proc.returncode != 0:
+            raise RuntimeError(
+                f"Failed to create server container: "
+                f"{create_err.decode(errors='replace')}"
+            )
+
+        # Wait for container to be running
+        await asyncio.sleep(1)
+
+        # Attach to the container for stdin/stdout piping.
+        # --sig-proxy=false prevents SIGTERM to `docker attach` from being
+        # forwarded to the container, so the container survives transport
+        # teardown and we can still `docker exec` for /tmp scanning.
         self.server_process = await asyncio.create_subprocess_exec(
-            *docker_cmd,
+            "docker",
+            "attach",
+            "--sig-proxy=false",
+            self._server_container_name,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
 
-        # Give server a moment to start
+        # Give MCP server a moment to initialize
         await asyncio.sleep(2)
 
         # 6. Start resource monitoring
         self._resource_task = asyncio.create_task(self._monitor_resources())
 
         return self.server_process.stdout, self.server_process.stdin
+
+    def _start_sink(self, sink_name: str):
+        """
+        Start the exfil sink container.
+
+        Tries bridge-networked first; if the container fails to start
+        (e.g. veth creation fails in nested-container environments),
+        cleans up the bridge network and retries with host networking.
+        """
+        sink_kwargs = {
+            "detach": True,
+            "name": sink_name,
+            "labels": {"sentinel.role": "exfil-sink"},
+        }
+        if self._host_mode:
+            sink_kwargs["network_mode"] = "host"
+        else:
+            sink_kwargs["network"] = self._network_name
+
+        try:
+            return self.docker_client.containers.run(
+                self.image,
+                command=["python", "-u", "-c", SINK_SERVER_CODE],
+                **sink_kwargs,
+            )
+        except docker.errors.APIError as e:
+            if self._host_mode:
+                raise  # Already in host mode, nothing left to try
+            logger.warning(
+                "Sink start failed on bridge network (%s), "
+                "falling back to host mode",
+                e,
+            )
+            # Clean up the bridge network that didn't actually work
+            if self.network:
+                try:
+                    self.network.remove()
+                except Exception:
+                    pass
+                self.network = None
+            # Remove the failed container if it was created
+            try:
+                c = self.docker_client.containers.get(sink_name)
+                c.remove(force=True)
+            except docker.errors.NotFound:
+                pass
+
+            self._host_mode = True
+            self._network_name = "host"
+            return self.docker_client.containers.run(
+                self.image,
+                command=["python", "-u", "-c", SINK_SERVER_CODE],
+                detach=True,
+                name=sink_name,
+                network_mode="host",
+                labels={"sentinel.role": "exfil-sink"},
+            )
 
     async def _wait_for_sink_ready(self, sink_name: str, timeout: float = 15):
         """
@@ -308,15 +382,18 @@ class SandboxOrchestrator:
         # Parse exfil sink logs (HOST-SIDE canary detection)
         exfil_captures = self._parse_sink_captures()
 
-        # Stop server
-        if self.server_process:
+        # Stop the docker attach process (if still running)
+        if self.server_process and self.server_process.returncode is None:
             try:
                 self.server_process.terminate()
                 await asyncio.wait_for(
                     self.server_process.wait(), timeout=5
                 )
             except (asyncio.TimeoutError, ProcessLookupError):
-                self.server_process.kill()
+                try:
+                    self.server_process.kill()
+                except ProcessLookupError:
+                    pass
 
         # Stop Docker containers
         for container in [self.observer_container, self.sink_container]:
@@ -327,8 +404,7 @@ class SandboxOrchestrator:
                 except Exception:
                     pass
 
-        # The server container was --rm, so it auto-removes.
-        # But force-remove if still hanging.
+        # Force-remove server container (no --rm since we use detached mode).
         try:
             c = self.docker_client.containers.get(self._server_container_name)
             c.remove(force=True)
