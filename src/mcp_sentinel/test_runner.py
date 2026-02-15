@@ -12,12 +12,18 @@ Responsibilities:
 
 import asyncio
 import json
+import logging
 import time
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
+import anyio
+from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from mcp.shared.message import SessionMessage
+import mcp.types as mcp_types
 
 from mcp_sentinel.models import (
     Finding,
@@ -29,6 +35,90 @@ from mcp_sentinel.models import (
     ToolTestResult,
 )
 from mcp_sentinel.schema_analyzer import SchemaAnalyzer
+
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def _subprocess_stdio_transport(
+    process: asyncio.subprocess.Process,
+):
+    """
+    Bridge asyncio subprocess stdin/stdout into the anyio MemoryObjectStreams
+    that ClientSession expects.  Mirrors what mcp.client.stdio.stdio_client
+    does for its internally-spawned process.
+    """
+    read_stream_writer: MemoryObjectSendStream[SessionMessage | Exception]
+    read_stream: MemoryObjectReceiveStream[SessionMessage | Exception]
+
+    write_stream: MemoryObjectSendStream[SessionMessage]
+    write_stream_reader: MemoryObjectReceiveStream[SessionMessage]
+
+    read_stream_writer, read_stream = anyio.create_memory_object_stream[
+        SessionMessage | Exception
+    ](0)
+    write_stream, write_stream_reader = anyio.create_memory_object_stream[
+        SessionMessage
+    ](0)
+
+    async def stdout_reader():
+        """Read JSON-RPC messages from subprocess stdout."""
+        assert process.stdout is not None
+        try:
+            async with read_stream_writer:
+                buffer = b""
+                while True:
+                    chunk = await process.stdout.read(8192)
+                    if not chunk:
+                        break
+                    buffer += chunk
+                    while b"\n" in buffer:
+                        line, buffer = buffer.split(b"\n", 1)
+                        line_str = line.decode("utf-8", errors="replace").strip()
+                        if not line_str:
+                            continue
+                        try:
+                            message = mcp_types.JSONRPCMessage.model_validate_json(
+                                line_str
+                            )
+                            await read_stream_writer.send(SessionMessage(message))
+                        except Exception as exc:
+                            logger.warning(
+                                "Failed to parse JSON-RPC from server: %s", exc
+                            )
+                            await read_stream_writer.send(exc)
+        except (anyio.ClosedResourceError, asyncio.CancelledError):
+            pass
+
+    async def stdin_writer():
+        """Write JSON-RPC messages to subprocess stdin."""
+        assert process.stdin is not None
+        try:
+            async with write_stream_reader:
+                async for session_message in write_stream_reader:
+                    data = session_message.message.model_dump_json(
+                        by_alias=True, exclude_none=True
+                    )
+                    process.stdin.write((data + "\n").encode("utf-8"))
+                    await process.stdin.drain()
+        except (anyio.ClosedResourceError, asyncio.CancelledError):
+            pass
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(stdout_reader)
+        tg.start_soon(stdin_writer)
+        try:
+            yield read_stream, write_stream
+        finally:
+            # Terminate the subprocess first so stdout_reader unblocks
+            try:
+                process.terminate()
+            except ProcessLookupError:
+                pass
+            await read_stream.aclose()
+            await write_stream.aclose()
+            await read_stream_writer.aclose()
+            await write_stream_reader.aclose()
 
 
 class TestRunner:
@@ -90,21 +180,35 @@ class TestRunner:
             image=self.server_image,
             server_args=self.server_command or [],
         )
+        tools: list[dict] = []
+        telemetry: dict = {}
         try:
-            reader, writer = await sandbox.start()
+            _reader, _writer = await sandbox.start()
 
-            # NOTE: For sandbox mode, we need to wire subprocess streams
-            # into the MCP SDK's ClientSession. This requires a custom
-            # transport adapter (Step 11 integration point).
-            session = ClientSession(reader, writer)
-            await session.initialize()
+            # Bridge asyncio subprocess stdio → anyio MemoryObjectStreams
+            # required by ClientSession (Step 11 integration point).
+            assert sandbox.server_process is not None
+            async with _subprocess_stdio_transport(
+                sandbox.server_process
+            ) as (read_stream, write_stream):
+                async with ClientSession(read_stream, write_stream) as session:
+                    await session.initialize()
 
-            analyzer = SchemaAnalyzer(session)
-            tools = await analyzer.discover_tools()
-            await self._execute_tests(session, analyzer, tools, report_id)
+                    analyzer = SchemaAnalyzer(session)
+                    tools = await analyzer.discover_tools()
+                    await self._execute_tests(
+                        session, analyzer, tools, report_id
+                    )
 
-        finally:
-            telemetry = await sandbox.stop()
+                # Session closed; collect telemetry while container is
+                # still running (docker exec needs it for /tmp scan).
+                telemetry = await sandbox.stop()
+
+        except Exception:
+            # Ensure cleanup even on error
+            if not telemetry:
+                telemetry = await sandbox.stop()
+            raise
 
         self._analyze_sandbox_telemetry(telemetry, report_id)
 
