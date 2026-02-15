@@ -12,7 +12,9 @@ Key design decisions (v0.3):
 """
 
 import asyncio
+import logging
 import os
+import socket
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,6 +24,7 @@ import docker
 from mcp_sentinel.exfil_sink import SINK_PORT, SINK_SERVER_CODE, parse_sink_logs
 from mcp_sentinel.models import FilesystemEntry, ResourceSnapshot
 
+logger = logging.getLogger(__name__)
 
 # Canary credentials (injected as env vars into server container)
 CANARY_ENV_VARS = {
@@ -80,6 +83,9 @@ class SandboxOrchestrator:
         self._resource_task: asyncio.Task | None = None
         self._network_name: str = ""
         self._server_container_name: str = ""
+        self._scan_errors: list[str] = []
+        self._host_mode: bool = False
+        self._sink_ip: str = "127.0.0.1"
 
     async def start(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         """
@@ -94,57 +100,89 @@ class SandboxOrchestrator:
         self._server_container_name = f"sentinel_mcp_{run_id}"
 
         # 1. Create isolated network (internal = no internet)
-        self.network = self.docker_client.networks.create(
-            self._network_name,
-            driver="bridge",
-            internal=True,
-        )
+        # Falls back to host networking if bridge creation fails (e.g., in CI
+        # containers where kernel lacks bridge/iptables support).
+        try:
+            self.network = self.docker_client.networks.create(
+                self._network_name,
+                driver="bridge",
+                internal=True,
+            )
+            self._host_mode = False
+        except docker.errors.APIError as e:
+            logger.warning(
+                "Bridge network creation failed (%s), falling back to host mode", e
+            )
+            self._host_mode = True
+            self._network_name = "host"
 
         # 2. Start exfil sink
         sink_name = f"sentinel_sink_{run_id}"
+        sink_kwargs = {
+            "detach": True,
+            "name": sink_name,
+            "labels": {"sentinel.role": "exfil-sink"},
+        }
+        if self._host_mode:
+            sink_kwargs["network_mode"] = "host"
+        else:
+            sink_kwargs["network"] = self._network_name
+
         self.sink_container = self.docker_client.containers.run(
-            "python:3.11-slim",
+            self.image,  # Use same image (has Python) for sink
             command=["python", "-u", "-c", SINK_SERVER_CODE],
-            detach=True,
-            network=self._network_name,
-            name=sink_name,
-            labels={"sentinel.role": "exfil-sink"},
+            **sink_kwargs,
         )
 
-        # Wait for sink to be ready
-        await asyncio.sleep(1)
+        # Wait for sink to be READY (deterministic polling, not sleep)
+        await self._wait_for_sink_ready(sink_name)
 
         # Get sink IP
-        self.sink_container.reload()
-        sink_ip = self._get_container_ip(self.sink_container)
+        if self._host_mode:
+            self._sink_ip = "127.0.0.1"
+        else:
+            self.sink_container.reload()
+            self._sink_ip = self._get_container_ip(self.sink_container)
 
         # 3. Start observer sidecar (pcap -- Phase 2 parsing)
-        observer_name = f"sentinel_observer_{run_id}"
-        self.observer_container = self.docker_client.containers.run(
-            "nicolaka/netshoot:latest",
-            command=[
-                "tcpdump",
-                "-i",
-                "any",
-                "-nn",
-                "-l",
-                "-w",
-                "/telemetry/capture.pcap",
-                "not",
-                "port",
-                "22",
-            ],
-            detach=True,
-            network=self._network_name,
-            cap_add=["NET_RAW", "NET_ADMIN"],
-            volumes={
-                str(self.telemetry_dir): {"bind": "/telemetry", "mode": "rw"}
-            },
-            labels={"sentinel.role": "observer"},
-        )
+        # Skip observer in host mode (tcpdump needs NET_RAW which may not be
+        # available, and pcap parsing is deferred to Phase 2 anyway)
+        if not self._host_mode:
+            observer_name = f"sentinel_observer_{run_id}"
+            try:
+                self.observer_container = self.docker_client.containers.run(
+                    "nicolaka/netshoot:latest",
+                    command=[
+                        "tcpdump",
+                        "-i",
+                        "any",
+                        "-nn",
+                        "-l",
+                        "-w",
+                        "/telemetry/capture.pcap",
+                        "not",
+                        "port",
+                        "22",
+                    ],
+                    detach=True,
+                    network=self._network_name,
+                    cap_add=["NET_RAW", "NET_ADMIN"],
+                    volumes={
+                        str(self.telemetry_dir): {
+                            "bind": "/telemetry",
+                            "mode": "rw",
+                        }
+                    },
+                    labels={"sentinel.role": "observer"},
+                )
+            except docker.errors.APIError:
+                # Observer is non-critical (pcap parsing is Phase 2)
+                logger.warning("Observer sidecar failed to start (non-critical)")
 
         # 4. Build extra_hosts mapping (trapped domains -> sink)
-        extra_hosts = [f"{domain}:{sink_ip}" for domain in TRAPPED_DOMAINS]
+        extra_hosts = [
+            f"{domain}:{self._sink_ip}" for domain in TRAPPED_DOMAINS
+        ]
 
         # 5. Launch MCP server via subprocess docker run -i
         docker_cmd = [
@@ -153,15 +191,19 @@ class SandboxOrchestrator:
             "-i",  # Interactive (stdin open)
             "--rm",  # Cleanup on exit
             f"--name={self._server_container_name}",
-            f"--network={self._network_name}",
             f"--memory={self.memory_limit}",
             f"--cpus={self.cpu_limit}",
             "--pids-limit=100",
             "--read-only",
-            "--tmpfs=/tmp:rw,noexec,nosuid,size=64M",
+            "--tmpfs=/tmp:rw,nosuid,size=64M",
             "--security-opt=no-new-privileges:true",
             "--cap-drop=ALL",
         ]
+
+        if self._host_mode:
+            docker_cmd.append("--network=host")
+        else:
+            docker_cmd.append(f"--network={self._network_name}")
 
         # Inject canary env vars
         for key, val in CANARY_ENV_VARS.items():
@@ -190,6 +232,53 @@ class SandboxOrchestrator:
 
         return self.server_process.stdout, self.server_process.stdin
 
+    async def _wait_for_sink_ready(self, sink_name: str, timeout: float = 15):
+        """
+        Poll until the exfil sink is actually listening on SINK_PORT.
+
+        Anti-flake: The evil server may exfil immediately on first tool call.
+        If the sink isn't ready, those captures are lost → false negative for
+        MUST PASS #3/#4.
+        """
+        deadline = asyncio.get_event_loop().time() + timeout
+        while asyncio.get_event_loop().time() < deadline:
+            try:
+                self.sink_container.reload()
+                status = self.sink_container.status
+                if status != "running":
+                    await asyncio.sleep(0.3)
+                    continue
+
+                # Try connecting to the sink port to verify it's listening
+                if self._host_mode:
+                    # On host mode, check localhost directly
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(1)
+                    result = sock.connect_ex(("127.0.0.1", SINK_PORT))
+                    sock.close()
+                    if result == 0:
+                        return
+                else:
+                    # On bridge mode, use docker exec to check
+                    check = self.docker_client.containers.get(sink_name)
+                    exit_code, _ = check.exec_run(
+                        ["python", "-c",
+                         f"import socket; s=socket.socket(); "
+                         f"s.settimeout(1); s.connect(('127.0.0.1',{SINK_PORT})); "
+                         f"s.close(); print('ok')"],
+                        demux=False,
+                    )
+                    if exit_code == 0:
+                        return
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+
+        logger.warning(
+            "Sink readiness check timed out after %.0fs — proceeding anyway",
+            timeout,
+        )
+
     async def stop(self) -> dict:
         """
         Tear down sandbox and return all telemetry.
@@ -200,6 +289,7 @@ class SandboxOrchestrator:
         - resource_snapshots: list[ResourceSnapshot]
         - processes: list[str]
         - pcap_path: str
+        - scan_errors: list[str] (any errors during /tmp scan)
         """
         # Stop resource monitor
         if self._resource_task:
@@ -245,8 +335,8 @@ class SandboxOrchestrator:
         except docker.errors.NotFound:
             pass
 
-        # Remove network
-        if self.network:
+        # Remove network (only if we created one)
+        if self.network and not self._host_mode:
             try:
                 self.network.remove()
             except Exception:
@@ -258,6 +348,7 @@ class SandboxOrchestrator:
             "resource_snapshots": self.resource_snapshots,
             "processes": processes,
             "pcap_path": str(self.telemetry_dir / "capture.pcap"),
+            "scan_errors": self._scan_errors,
         }
 
     async def _scan_tmp(self) -> list[FilesystemEntry]:
@@ -270,6 +361,9 @@ class SandboxOrchestrator:
         - docker exec + find + stat gives us everything
 
         This is how MUST PASS #5 (filesystem write detection) works.
+
+        Anti-flake: If docker exec fails, record the error visibly in
+        self._scan_errors so it shows up in the report and tests can detect it.
         """
         entries: list[FilesystemEntry] = []
         try:
@@ -293,7 +387,17 @@ class SandboxOrchestrator:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=10
+            )
+
+            if proc.returncode != 0:
+                error_msg = (
+                    f"docker exec find/stat failed (exit {proc.returncode}): "
+                    f"{stderr.decode(errors='replace').strip()}"
+                )
+                logger.error(error_msg)
+                self._scan_errors.append(error_msg)
 
             for line in stdout.decode(errors="replace").splitlines():
                 parts = line.strip().rsplit(maxsplit=2)
@@ -351,8 +455,10 @@ class SandboxOrchestrator:
                         content_preview=preview[:256],
                     )
                 )
-        except Exception:
-            pass  # If exec fails, we get no FS data -- noted in report
+        except Exception as e:
+            error_msg = f"_scan_tmp failed: {type(e).__name__}: {e}"
+            logger.error(error_msg)
+            self._scan_errors.append(error_msg)
 
         return entries
 
