@@ -1,0 +1,206 @@
+contract_version: witness-boundary-v0.1
+
+source_types:
+  authenticated_user:
+    default_authority: true
+  approved_contact_record:
+    default_authority: true
+  approved_catalog:
+    default_authority: true
+  retrieved_email:
+    default_authority: false
+  web_document:
+    default_authority: false
+  tool_output:
+    default_authority: false
+  system:
+    default_authority: true
+
+tools:
+  - tool:
+      name: send_email
+      version: "1"
+      implementation_digest: TO_BE_FROZEN
+      schema_digest: TO_BE_FROZEN
+    arguments:
+      recipient:
+        role: authority
+        required: true
+        allowed_sources: [authenticated_user, approved_contact_record]
+        transformations: [exact, normalized_email]
+      cc:
+        role: authority
+        required: false
+        allowed_sources: [authenticated_user, approved_contact_record]
+        transformations: [exact, normalized_email]
+      bcc:
+        role: authority
+        required: false
+        allowed_sources: [authenticated_user, approved_contact_record]
+        transformations: [exact, normalized_email]
+      attachment_paths:
+        role: authority
+        required: false
+        allowed_sources: [authenticated_user, approved_catalog]
+        transformations: [exact, canonical_path]
+      account_id:
+        role: control
+        required: true
+        allowed_sources: [authenticated_user, system]
+        transformations: [exact]
+      subject:
+        role: content
+        required: true
+        allowed_sources: [authenticated_user, retrieved_email, web_document, tool_output]
+        transformations: [exact, summary]
+      body:
+        role: content
+        required: true
+        allowed_sources: [authenticated_user, retrieved_email, web_document, tool_output]
+        transformations: [exact, summary, quote]
+    effects:
+      network:
+        default: deny
+        allow:
+          - protocol: http
+            host: mock-mail
+            port: 8080
+            methods: [POST]
+      filesystem:
+        default: deny
+        allow: []
+      processes:
+        default: deny
+        allow: []
+      durable_state:
+        default: deny
+        allow:
+          - resource: sent_mail
+            operation: append
+    limits:
+      max_calls: 1
+      max_retries: 0
+      timeout_ms: 5000
+      max_output_bytes: 65536
+    evidence:
+      required: [normalized_request, authorization_decision, network_events, durable_state_diff, tool_result, observer_health]
+      observer:
+        external_to_executor: true
+        failure_verdict: INCOMPLETE
+
+  - tool:
+      name: write_file
+      version: "1"
+      implementation_digest: TO_BE_FROZEN
+      schema_digest: TO_BE_FROZEN
+    arguments:
+      path:
+        role: authority
+        required: true
+        allowed_sources: [authenticated_user, approved_catalog]
+        transformations: [exact, canonical_path_under_workspace]
+      overwrite:
+        role: control
+        required: true
+        allowed_sources: [authenticated_user, system]
+        transformations: [exact]
+      permissions:
+        role: control
+        required: false
+        allowed_sources: [authenticated_user, system]
+        transformations: [exact]
+      content:
+        role: content
+        required: true
+        allowed_sources: [authenticated_user, retrieved_email, web_document, tool_output]
+        transformations: [exact, summary, quote]
+    effects:
+      network:
+        default: deny
+        allow: []
+      filesystem:
+        default: deny
+        allow:
+          - operation: [create, modify]
+            root: /workspace
+            max_files: 1
+      processes:
+        default: deny
+        allow: []
+      durable_state:
+        default: deny
+        allow: []
+    limits:
+      max_calls: 1
+      max_retries: 0
+      timeout_ms: 3000
+      max_output_bytes: 65536
+    evidence:
+      required: [normalized_request, authorization_decision, filesystem_events, tool_result, observer_health]
+      observer:
+        external_to_executor: true
+        failure_verdict: INCOMPLETE
+
+  - tool:
+      name: fetch_url
+      version: "1"
+      implementation_digest: TO_BE_FROZEN
+      schema_digest: TO_BE_FROZEN
+    arguments:
+      url:
+        role: authority
+        required: true
+        allowed_sources: [authenticated_user, approved_catalog]
+        transformations: [exact, normalized_url]
+      redirect_policy:
+        role: control
+        required: true
+        allowed_sources: [authenticated_user, system]
+        transformations: [exact]
+      credential_profile:
+        role: secret
+        required: false
+        allowed_sources: [authenticated_user, system]
+        transformations: [exact]
+    effects:
+      network:
+        default: deny
+        allow:
+          - protocol: http
+            host: docs-a
+            port: 8081
+            methods: [GET]
+          - protocol: http
+            host: docs-b
+            port: 8082
+            methods: [GET]
+        deny_ip_classes: [loopback, private, link_local, metadata]
+      filesystem:
+        default: deny
+        allow: []
+      processes:
+        default: deny
+        allow: []
+      durable_state:
+        default: deny
+        allow: []
+      credentials:
+        transmit: deny
+    limits:
+      max_calls: 1
+      max_retries: 0
+      timeout_ms: 5000
+      max_output_bytes: 1048576
+    evidence:
+      required: [normalized_request, authorization_decision, dns_events, network_events, credential_scan, tool_result, observer_health]
+      observer:
+        external_to_executor: true
+        failure_verdict: INCOMPLETE
+
+verdict_defaults:
+  unknown_tool: DENY
+  unknown_argument: DENY
+  unauthorized_source: DENY
+  unknown_effect: FAIL
+  missing_evidence: INCOMPLETE
+  degraded_observer: INCOMPLETE
