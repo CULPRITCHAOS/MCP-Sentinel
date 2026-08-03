@@ -16,9 +16,29 @@ from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_MANIFEST = ROOT / "results" / "witness-v0.1" / "preregistration-digest.txt"
+MANIFEST_PATH = "results/witness-v0.1/preregistration-digest.txt"
+DEFAULT_MANIFEST = ROOT / MANIFEST_PATH
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+EXPECTED_MANIFEST_SHA256 = (
+    "9bc39d5db8dd09bd82bf8ab9472f187e863299cd6a406262dfa1dc986b1aa351"
+)
+EXPECTED_METADATA = {
+    "manifest_version": "witness-preregistration-v0.1",
+    "repository": "CULPRITCHAOS/MCP-Sentinel",
+    "branch": "experiment/witness-boundary-contracts-v0",
+    "starting_commit": "39bb8f4894f224ff37af62060812de7e68fbc2ea",
+    "hash_algorithm": "sha256",
+    "hash_domain": "git_blob_bytes_at_starting_commit",
+}
+EXPECTED_ARTIFACT_PATHS = frozenset(
+    {
+        "docs/WITNESS_BOUNDARY_CONTRACTS_EXPERIMENT_V0_1.md",
+        "contracts/boundary-contracts-v0.1.yaml",
+        "fixtures/witness/scenarios-v0.1.json",
+        "docs/WITNESS_IMPLEMENTATION_CHECKLIST_V0_1.md",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -36,12 +56,12 @@ def _git(*args: str, check: bool = True) -> subprocess.CompletedProcess[bytes]:
     )
 
 
-def _parse_manifest(path: Path) -> Manifest:
+def _parse_manifest_content(content: str) -> Manifest:
     fields: dict[str, str] = {}
     artifacts: list[tuple[str, str]] = []
+    artifact_paths: set[str] = set()
 
-    lines = path.read_text(encoding="utf-8").splitlines()
-    for line_number, raw_line in enumerate(lines, 1):
+    for line_number, raw_line in enumerate(content.splitlines(), 1):
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
@@ -55,26 +75,64 @@ def _parse_manifest(path: Path) -> Manifest:
             is_absolute = artifact_path.startswith(("/", "\\"))
             if is_absolute or ".." in Path(artifact_path).parts:
                 raise ValueError(f"unsafe artifact path on line {line_number}")
+            if artifact_path in artifact_paths:
+                raise ValueError(f"duplicate artifact path on line {line_number}")
             artifacts.append((digest, artifact_path))
+            artifact_paths.add(artifact_path)
             continue
         if "=" not in line:
             raise ValueError(f"invalid manifest line {line_number}")
         key, value = line.split("=", 1)
+        if key not in EXPECTED_METADATA:
+            raise ValueError(f"unknown metadata key on line {line_number}: {key}")
+        if key in fields:
+            raise ValueError(f"duplicate metadata key on line {line_number}: {key}")
         fields[key] = value
 
-    commit = fields.get("starting_commit", "")
+    missing_keys = EXPECTED_METADATA.keys() - fields.keys()
+    if missing_keys:
+        missing = ", ".join(sorted(missing_keys))
+        raise ValueError(f"missing metadata keys: {missing}")
+
+    for key, expected in EXPECTED_METADATA.items():
+        actual = fields[key]
+        if actual != expected:
+            raise ValueError(
+                f"metadata {key} mismatch: expected {expected}, got {actual}"
+            )
+
+    commit = fields["starting_commit"]
     if not COMMIT_RE.fullmatch(commit):
         raise ValueError("starting_commit must be a full lowercase Git SHA-1")
-    if fields.get("hash_algorithm") != "sha256":
-        raise ValueError("hash_algorithm must be sha256")
-    if fields.get("hash_domain") != "git_blob_bytes_at_starting_commit":
-        raise ValueError("unexpected hash_domain")
-    if not artifacts:
-        raise ValueError("manifest contains no artifacts")
-    if len({path for _, path in artifacts}) != len(artifacts):
-        raise ValueError("manifest contains duplicate artifact paths")
+
+    if artifact_paths != EXPECTED_ARTIFACT_PATHS:
+        missing_paths = sorted(EXPECTED_ARTIFACT_PATHS - artifact_paths)
+        extra_paths = sorted(artifact_paths - EXPECTED_ARTIFACT_PATHS)
+        raise ValueError(
+            "artifact path set mismatch: "
+            f"missing={missing_paths}, extra={extra_paths}"
+        )
 
     return Manifest(commit, tuple(artifacts))
+
+
+def _canonical_manifest_bytes(path: Path) -> bytes:
+    raw = path.read_bytes()
+    canonical = raw.replace(b"\r\n", b"\n")
+    if b"\r" in canonical:
+        raise ValueError("manifest contains unsupported carriage returns")
+    return canonical
+
+
+def _parse_manifest(path: Path) -> Manifest:
+    canonical = _canonical_manifest_bytes(path)
+    actual_digest = _sha256(canonical)
+    if actual_digest != EXPECTED_MANIFEST_SHA256:
+        raise ValueError(
+            "manifest checkpoint mismatch: "
+            f"expected {EXPECTED_MANIFEST_SHA256}, got {actual_digest}"
+        )
+    return _parse_manifest_content(canonical.decode("utf-8"))
 
 
 def _blob(commit: str, path: str) -> bytes:
@@ -102,7 +160,10 @@ def _ensure_clean(paths: tuple[str, ...]) -> list[str]:
 
 
 def verify(manifest_path: Path) -> list[str]:
-    manifest = _parse_manifest(manifest_path)
+    try:
+        manifest = _parse_manifest(manifest_path)
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        return [f"invalid manifest: {exc}"]
     errors: list[str] = []
 
     commit_check = _git(
@@ -115,7 +176,18 @@ def verify(manifest_path: Path) -> list[str]:
         return [f"starting commit is unavailable: {manifest.starting_commit}"]
 
     head = _git("rev-parse", "HEAD").stdout.decode("ascii").strip()
-    paths = tuple(path for _, path in manifest.artifacts)
+    paths = tuple(path for _, path in manifest.artifacts) + (MANIFEST_PATH,)
+
+    try:
+        head_manifest_digest = _sha256(_blob(head, MANIFEST_PATH))
+    except subprocess.CalledProcessError:
+        errors.append(f"manifest missing at HEAD: {MANIFEST_PATH}")
+    else:
+        if head_manifest_digest != EXPECTED_MANIFEST_SHA256:
+            errors.append(
+                "committed manifest drift: "
+                f"expected {EXPECTED_MANIFEST_SHA256}, got {head_manifest_digest}"
+            )
 
     for expected, path in manifest.artifacts:
         try:
