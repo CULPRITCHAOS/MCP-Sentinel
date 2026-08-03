@@ -1,0 +1,21 @@
+manifest_version=witness-preregistration-v0.2
+deviation_id=DEV-WIT-001
+repository=CULPRITCHAOS/MCP-Sentinel
+branch=experiment/witness-boundary-contracts-v0.2
+source_base_commit=903d4d3910f887a389ef40a4ca90be6ea0168d34
+starting_commit=68dc76682bc7716207645b0fb3fa7702a384b3f6
+hash_algorithm=sha256
+hash_domain=git_blob_bytes_at_starting_commit
+
+artifact cbc7ce424417dede4f2e1ce0cd9bb65a49614b4c9fd74b62fbe331b9be6ed34d  docs/WITNESS_BOUNDARY_CONTRACTS_EXPERIMENT_V0_2.md
+artifact 2646ffc473beb27f483bc86b00aae13757247e5d9985b8b6cd529c230688da15  contracts/boundary-contracts-v0.2.yaml
+artifact 75243c33921c90e0780dfbea7a446f6519a676d2abf6666bdbe7d92fa6a8b377  fixtures/witness/scenarios-v0.2.json
+artifact 8d9212348f20d4a6c7cec6e8e22e5b4477a63efff7334f4cd95f1a6b569157b1  docs/WITNESS_IMPLEMENTATION_CHECKLIST_V0_2.md
+artifact cad536669c0884becdcc9201db4dea3861c18f34b04165273cce62d9553ca9b8  docs/WITNESS_CLAIMS_MATRIX_V0_2.md
+artifact bf09b8b5a4464ae9e9e4d24bda3690eeb51b73d3ddc78fa0f8933ba1fc0ab36a  docs/WITNESS_DEVIATION_DEV_WIT_001.md
+
+# Digests cover the exact bytes stored by Git at starting_commit. They do not
+# cover checkout-specific CRLF conversion. v0.1 checkpoint evidence remains
+# separate and unchanged. Run the v0.2 repository verifier with:
+#
+#   python scripts/verify_witness_preregistration_v0_2.py
