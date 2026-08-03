@@ -1,0 +1,16 @@
+manifest_version=witness-preregistration-v0.1
+repository=CULPRITCHAOS/MCP-Sentinel
+branch=experiment/witness-boundary-contracts-v0
+starting_commit=39bb8f4894f224ff37af62060812de7e68fbc2ea
+hash_algorithm=sha256
+hash_domain=git_blob_bytes_at_starting_commit
+
+artifact 38d09d8e24b488202aee737cf6deae7b638383ff37f9e0e41392e0913503862a  docs/WITNESS_BOUNDARY_CONTRACTS_EXPERIMENT_V0_1.md
+artifact 90ba9eec40d076e8c2533a90b44a3397c665700c56a7b0af58cc118c420bdf54  contracts/boundary-contracts-v0.1.yaml
+artifact 8bf35a0756f86a1ca5ec0da1ef87e4cb7e3855de07e818625bd87eeb6f2f6f35  fixtures/witness/scenarios-v0.1.json
+artifact 9e7964eab719f98248dadd14e5ed3ccaf2cbbf2838436f02136e06ba015b6ee0  docs/WITNESS_IMPLEMENTATION_CHECKLIST_V0_1.md
+
+# Digests cover the exact bytes stored by Git at starting_commit. They do not
+# cover checkout-specific CRLF conversion. Run the repository verifier with:
+#
+#   python scripts/verify_witness_preregistration.py
