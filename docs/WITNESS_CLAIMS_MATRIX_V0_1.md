@@ -13,6 +13,14 @@ metrics, thresholds, baselines, and decision rules remain governed by the frozen
 experiment specification. Any change to those elements requires a formal
 deviation record and, where applicable, a new experiment version.
 
+## Checkpoint trust boundary
+
+The manifest SHA-256 pinned in the verifier is an internal consistency check. It
+is not an independently external trust anchor because code and constants can be
+changed together. Accountability for verifier changes comes from Git review of
+the exact checkpoint commit plus the matching checkpoint recorded outside the
+repository on Linear.
+
 | ID | Exact claim under test | Locked evaluation | Required evidence | Phase | Status |
 |---|---|---|---|---|---|
 | C1 | Per-argument source authority prevents unauthorized destination/control substitution that valid JSON schemas and whole-tool permissions cannot distinguish. | Compare B7/B3 with B1 and B2 on authority/control attack variants; combined `UASR <= 5%` and unsupported provenance acceptance `= 0`. | Host-issued source records, normalized requests, authorization decisions, execution records, and per-baseline UASR. | 1–2 | `planned` |

@@ -3,6 +3,10 @@
 The manifest hashes Git blob bytes at the recorded starting commit. This avoids
 platform-specific line-ending changes while still detecting later committed,
 staged, or unstaged changes to any frozen artifact.
+
+The code-pinned manifest digest is an internal consistency check, not an
+independently external trust anchor. Git review of the exact verifier commit and
+the Linear-recorded checkpoint anchor changes to the verifier and its pins.
 """
 
 from __future__ import annotations
