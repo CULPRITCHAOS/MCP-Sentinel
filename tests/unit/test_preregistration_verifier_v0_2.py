@@ -121,7 +121,7 @@ def test_artifact_removal_is_rejected() -> None:
 
 def test_artifact_substitution_is_rejected() -> None:
     substituted = _manifest_text().replace(
-        "docs/WITNESS_IMPLEMENTATION_CHECKLIST_V0_1.md",
+        "docs/WITNESS_IMPLEMENTATION_CHECKLIST_V0_2.md",
         "docs/SUBSTITUTED.md",
     )
 
