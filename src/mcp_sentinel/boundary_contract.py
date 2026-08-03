@@ -20,7 +20,7 @@ from yaml.tokens import (  # type: ignore[import-untyped]
     TagToken,
 )
 
-CONTRACT_VERSION = "witness-boundary-v0.1"
+CONTRACT_VERSION = "witness-boundary-v0.2"
 MAX_CONTRACT_BYTES = 1_048_576
 
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -453,6 +453,12 @@ def _parse_tool(
     effects = _parse_effects(item["effects"], f"{path}.effects")
     limits = _parse_limits(item["limits"], f"{path}.limits")
     evidence = _parse_evidence(item["evidence"], f"{path}.evidence")
+    _validate_effect_evidence(
+        effects,
+        evidence,
+        effects_path=f"{path}.effects",
+        evidence_path=f"{path}.evidence",
+    )
     return ToolContract(identity, arguments, effects, limits, evidence)
 
 
@@ -621,7 +627,7 @@ def _parse_processes(value: object, path: str) -> ProcessEffects:
     if allowed:
         raise BoundaryContractError(
             f"{path}.allow",
-            "process allow rules are not defined in contract version v0.1",
+            "process allow rules are not defined in contract version v0.2",
         )
     return ProcessEffects(default)
 
@@ -708,6 +714,35 @@ def _parse_evidence(value: object, path: str) -> EvidenceRules:
             f"{observer_path}.failure_verdict", "must be INCOMPLETE"
         )
     return EvidenceRules(required, ObserverRules(external, failure))
+
+
+def _validate_effect_evidence(
+    effects: Effects,
+    evidence: EvidenceRules,
+    *,
+    effects_path: str,
+    evidence_path: str,
+) -> None:
+    """Require explicit telemetry for every effect domain the tool enforces."""
+
+    requirements = [
+        (EvidenceKind.NETWORK_EVENTS, f"{effects_path}.network"),
+        (EvidenceKind.DNS_EVENTS, f"{effects_path}.network"),
+        (EvidenceKind.FILESYSTEM_EVENTS, f"{effects_path}.filesystem"),
+        (EvidenceKind.PROCESS_EVENTS, f"{effects_path}.processes"),
+        (EvidenceKind.DURABLE_STATE_DIFF, f"{effects_path}.durable_state"),
+    ]
+    if effects.credentials is not None:
+        requirements.append(
+            (EvidenceKind.CREDENTIAL_SCAN, f"{effects_path}.credentials")
+        )
+
+    for evidence_kind, required_by in requirements:
+        if evidence_kind not in evidence.required:
+            raise BoundaryContractError(
+                f"{evidence_path}.required",
+                f"missing {evidence_kind.value} required by {required_by}",
+            )
 
 
 def _parse_verdict_defaults(value: object) -> VerdictDefaults:

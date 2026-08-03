@@ -22,7 +22,7 @@ from mcp_sentinel.boundary_contract import (
 )
 
 CONTRACT_PATH = (
-    Path(__file__).parents[2] / "contracts" / "boundary-contracts-v0.1.yaml"
+    Path(__file__).parents[2] / "contracts" / "boundary-contracts-v0.2.yaml"
 )
 
 
@@ -58,6 +58,13 @@ def _write_file_tool(data: dict[str, Any]) -> dict[str, Any]:
     return cast(
         dict[str, Any],
         next(tool for tool in data["tools"] if tool["tool"]["name"] == "write_file"),
+    )
+
+
+def _tool(data: dict[str, Any], name: str) -> dict[str, Any]:
+    return cast(
+        dict[str, Any],
+        next(tool for tool in data["tools"] if tool["tool"]["name"] == name),
     )
 
 
@@ -107,6 +114,31 @@ class TestFrozenContract:
         assert EvidenceKind.OBSERVER_HEALTH in fetch_url.evidence.required
         assert fetch_url.evidence.observer.external_to_executor is True
         assert fetch_url.evidence.observer.failure_verdict is Verdict.INCOMPLETE
+
+    @pytest.mark.parametrize(
+        ("tool_name", "expects_credential_scan"),
+        [
+            ("send_email", False),
+            ("write_file", False),
+            ("fetch_url", True),
+        ],
+    )
+    def test_accepts_complete_effect_evidence_for_all_v0_2_tools(
+        self, tool_name: str, expects_credential_scan: bool
+    ) -> None:
+        contract = BoundaryContract.from_file(CONTRACT_PATH)
+        tool = next(item for item in contract.tools if item.tool.name == tool_name)
+        required = set(tool.evidence.required)
+
+        assert {
+            EvidenceKind.OBSERVER_HEALTH,
+            EvidenceKind.NETWORK_EVENTS,
+            EvidenceKind.DNS_EVENTS,
+            EvidenceKind.FILESYSTEM_EVENTS,
+            EvidenceKind.PROCESS_EVENTS,
+            EvidenceKind.DURABLE_STATE_DIFF,
+        } <= required
+        assert (EvidenceKind.CREDENTIAL_SCAN in required) is expects_credential_scan
 
     def test_normalized_representation_is_canonical_json(self) -> None:
         contract = BoundaryContract.from_file(CONTRACT_PATH)
@@ -385,12 +417,54 @@ class TestFailClosedRules:
 
         _assert_error(_yaml(data), r"failure_verdict: must be INCOMPLETE")
 
-    def test_rejects_missing_core_evidence(self, contract_text: str) -> None:
+    @pytest.mark.parametrize(
+        "evidence_kind",
+        [
+            "normalized_request",
+            "authorization_decision",
+            "tool_result",
+            "observer_health",
+        ],
+    )
+    def test_rejects_missing_core_evidence(
+        self, contract_text: str, evidence_kind: str
+    ) -> None:
         data = _data(contract_text)
         required = _first_tool(data)["evidence"]["required"]
-        required.remove("observer_health")
+        required.remove(evidence_kind)
 
-        _assert_error(_yaml(data), r"missing fail-closed evidence: observer_health")
+        _assert_error(
+            _yaml(data), rf"missing fail-closed evidence: {evidence_kind}"
+        )
+
+    @pytest.mark.parametrize(
+        ("tool_name", "tool_index", "evidence_kind", "effect_field"),
+        [
+            ("write_file", 1, "network_events", "network"),
+            ("write_file", 1, "dns_events", "network"),
+            ("send_email", 0, "filesystem_events", "filesystem"),
+            ("send_email", 0, "process_events", "processes"),
+            ("write_file", 1, "durable_state_diff", "durable_state"),
+            ("fetch_url", 2, "credential_scan", "credentials"),
+        ],
+    )
+    def test_rejects_missing_effect_evidence_with_precise_field_path(
+        self,
+        contract_text: str,
+        tool_name: str,
+        tool_index: int,
+        evidence_kind: str,
+        effect_field: str,
+    ) -> None:
+        data = _data(contract_text)
+        _tool(data, tool_name)["evidence"]["required"].remove(evidence_kind)
+
+        _assert_error(
+            _yaml(data),
+            rf"tools\[{tool_index}\]\.evidence\.required: missing "
+            rf"{evidence_kind} required by "
+            rf"tools\[{tool_index}\]\.effects\.{effect_field}",
+        )
 
     def test_rejects_weakened_verdict_default(self, contract_text: str) -> None:
         data = _data(contract_text)
@@ -401,11 +475,11 @@ class TestFailClosedRules:
 
 class TestSafeYamlAndFiles:
     def test_rejects_yaml_aliases_and_anchors(self) -> None:
-        text = "contract_version: &version witness-boundary-v0.1\ncopy: *version\n"
+        text = f"contract_version: &version {CONTRACT_VERSION}\ncopy: *version\n"
         _assert_error(text, r"anchors, aliases, and explicit tags are not allowed")
 
     def test_rejects_explicit_yaml_tags(self) -> None:
-        text = "contract_version: !!str witness-boundary-v0.1\n"
+        text = f"contract_version: !!str {CONTRACT_VERSION}\n"
         _assert_error(text, r"anchors, aliases, and explicit tags are not allowed")
 
     def test_rejects_non_string_mapping_key(self) -> None:
