@@ -73,13 +73,69 @@ class SourceRecord:
 
 
 @dataclass(frozen=True)
+class TrustedRootRecord:
+    """A host-issued root identity bound to one source and exact value digest."""
+
+    root_id: str
+    source_id: str
+    value_digest: str
+    normalized_value: str | None = None
+
+    @property
+    def value(self) -> object | None:
+        if self.normalized_value is None:
+            return None
+        return cast(object, json.loads(self.normalized_value))
+
+    def matches(self, normalized_value: str) -> bool:
+        return _sha256(normalized_value) == self.value_digest
+
+    def to_normalized_data(self) -> dict[str, object]:
+        return {
+            "root_id": self.root_id,
+            "source_id": self.source_id,
+            "value_digest": self.value_digest,
+        }
+
+
+@dataclass(frozen=True)
+class TrustedSourceRegistry:
+    """Immutable host authority supplied separately from lineage JSON."""
+
+    contract_digest: str
+    sources: tuple[SourceRecord, ...]
+    roots: tuple[TrustedRootRecord, ...]
+
+    @classmethod
+    def from_data(
+        cls, value: object, contract: BoundaryContract
+    ) -> TrustedSourceRegistry:
+        return _parse_registry(value, contract)
+
+    @property
+    def normalized(self) -> str:
+        return _canonical_json(self.to_normalized_data())
+
+    @property
+    def digest(self) -> str:
+        return _sha256(self.normalized)
+
+    def to_normalized_data(self) -> dict[str, object]:
+        return {
+            "contract_digest": self.contract_digest,
+            "roots": [root.to_normalized_data() for root in self.roots],
+            "sources": [source.to_normalized_data() for source in self.sources],
+        }
+
+
+@dataclass(frozen=True)
 class ValueLineage:
     """One immutable value node in a source/parent-linked lineage graph."""
 
     value_id: str
     normalized_value: str
     transformation: Transformation
-    source_ids: tuple[str, ...]
+    root_id: str | None
     parent_value_ids: tuple[str, ...]
 
     @property
@@ -95,7 +151,7 @@ class ValueLineage:
     def to_normalized_data(self) -> dict[str, object]:
         return {
             "parent_value_ids": list(self.parent_value_ids),
-            "source_ids": list(self.source_ids),
+            "root_id": self.root_id,
             "transformation": self.transformation.value,
             "value": self.value,
             "value_id": self.value_id,
@@ -125,6 +181,7 @@ class ResolvedArgumentLineage:
     """The exact sources and value graph controlling one bound argument."""
 
     argument: ArgumentValue
+    roots: tuple[TrustedRootRecord, ...]
     sources: tuple[SourceRecord, ...]
     values: tuple[ValueLineage, ...]
 
@@ -133,6 +190,7 @@ class ResolvedArgumentLineage:
         return _canonical_json(
             {
                 "argument": self.argument.to_normalized_data(),
+                "roots": [root.to_normalized_data() for root in self.roots],
                 "sources": [source.to_normalized_data() for source in self.sources],
                 "values": [value.to_normalized_data() for value in self.values],
             }
@@ -147,6 +205,10 @@ class ResolvedArgumentLineage:
         return tuple(source.source_id for source in self.sources)
 
     @property
+    def root_ids(self) -> tuple[str, ...]:
+        return tuple(root.root_id for root in self.roots)
+
+    @property
     def transformations(self) -> tuple[Transformation, ...]:
         return tuple(value.transformation for value in self.values)
 
@@ -157,12 +219,18 @@ class LineageBundle:
 
     lineage_version: str
     contract_digest: str
-    sources: tuple[SourceRecord, ...]
+    registry_digest: str
     values: tuple[ValueLineage, ...]
     arguments: tuple[ArgumentValue, ...]
+    registry: TrustedSourceRegistry
 
     @classmethod
-    def from_json(cls, text: str, contract: BoundaryContract) -> LineageBundle:
+    def from_json(
+        cls,
+        text: str,
+        contract: BoundaryContract,
+        registry: TrustedSourceRegistry,
+    ) -> LineageBundle:
         if type(text) is not str:
             raise SourceLineageError("$", "lineage input must be text")
         try:
@@ -192,11 +260,16 @@ class LineageBundle:
             raise SourceLineageError(
                 "$", f"invalid JSON at line {exc.lineno} column {exc.colno}"
             ) from exc
-        return cls.from_data(loaded, contract)
+        return cls.from_data(loaded, contract, registry)
 
     @classmethod
-    def from_data(cls, value: object, contract: BoundaryContract) -> LineageBundle:
-        return _parse_bundle(value, contract)
+    def from_data(
+        cls,
+        value: object,
+        contract: BoundaryContract,
+        registry: TrustedSourceRegistry,
+    ) -> LineageBundle:
+        return _parse_bundle(value, contract, registry)
 
     @property
     def normalized(self) -> str:
@@ -213,7 +286,7 @@ class LineageBundle:
             "arguments": [item.to_normalized_data() for item in self.arguments],
             "contract_digest": self.contract_digest,
             "lineage_version": self.lineage_version,
-            "sources": [item.to_normalized_data() for item in self.sources],
+            "registry_digest": self.registry_digest,
             "values": [item.to_normalized_data() for item in self.values],
         }
 
@@ -240,24 +313,29 @@ class LineageBundle:
                 "arguments", "requested argument does not have a lineage binding"
             )
         value_by_id = {item.value_id: item for item in self.values}
-        source_by_id = {item.source_id: item for item in self.sources}
+        root_by_id = {item.root_id: item for item in self.registry.roots}
+        source_by_id = {item.source_id: item for item in self.registry.sources}
         ordered_value_ids = _ordered_value_ids(binding.value_id, value_by_id)
         values = tuple(value_by_id[value_id] for value_id in ordered_value_ids)
-        source_ids = {
-            source_id for item in values for source_id in item.source_ids
-        }
+        root_ids = {item.root_id for item in values if item.root_id is not None}
+        roots = tuple(root_by_id[root_id] for root_id in sorted(root_ids))
+        source_ids = {root.source_id for root in roots}
         sources = tuple(source_by_id[source_id] for source_id in sorted(source_ids))
-        return ResolvedArgumentLineage(binding, sources, values)
+        return ResolvedArgumentLineage(binding, roots, sources, values)
 
 
-def _parse_bundle(value: object, contract: BoundaryContract) -> LineageBundle:
+def _parse_bundle(
+    value: object,
+    contract: BoundaryContract,
+    registry: TrustedSourceRegistry,
+) -> LineageBundle:
     root = _object(
         value,
         "$",
         required={
             "lineage_version",
             "contract_digest",
-            "sources",
+            "registry_digest",
             "values",
             "arguments",
         },
@@ -276,16 +354,45 @@ def _parse_bundle(value: object, contract: BoundaryContract) -> LineageBundle:
         raise SourceLineageError(
             "contract_digest", "does not match the supplied BoundaryContract"
         )
+    if registry.contract_digest != contract.digest:
+        raise SourceLineageError(
+            "registry", "trusted registry does not match the supplied BoundaryContract"
+        )
+    registry_digest = _string(root["registry_digest"], "registry_digest")
+    if not _SHA256.fullmatch(registry_digest):
+        raise SourceLineageError(
+            "registry_digest", "must be 64 lowercase SHA-256 hex characters"
+        )
+    if registry_digest != registry.digest:
+        raise SourceLineageError(
+            "registry_digest", "does not match the trusted source registry"
+        )
 
+    values = _parse_values(root["values"])
+    value_by_id = {item.value_id: item for item in values}
+    root_by_id = {item.root_id: item for item in registry.roots}
+    _validate_value_graph(value_by_id, root_by_id)
+    arguments = _parse_arguments(root["arguments"], contract, value_by_id)
+    _reject_unreferenced_lineage(arguments, value_by_id)
+    return LineageBundle(
+        version,
+        contract_digest,
+        registry_digest,
+        values,
+        arguments,
+        registry,
+    )
+
+
+def _parse_registry(
+    value: object, contract: BoundaryContract
+) -> TrustedSourceRegistry:
+    root = _object(value, "$", required={"sources", "roots"})
     source_types = {item.name: item for item in contract.source_types}
     sources = _parse_sources(root["sources"], source_types)
     source_by_id = {item.source_id: item for item in sources}
-    values = _parse_values(root["values"])
-    value_by_id = {item.value_id: item for item in values}
-    _validate_value_graph(value_by_id, source_by_id)
-    arguments = _parse_arguments(root["arguments"], contract, value_by_id)
-    _reject_unreferenced_lineage(arguments, value_by_id, source_by_id)
-    return LineageBundle(version, contract_digest, sources, values, arguments)
+    roots = _parse_roots(root["roots"], source_by_id)
+    return TrustedSourceRegistry(contract.digest, sources, roots)
 
 
 def _parse_sources(
@@ -333,6 +440,56 @@ def _parse_sources(
     return tuple(sorted(records, key=lambda item: item.source_id))
 
 
+def _parse_roots(
+    value: object, source_by_id: dict[str, SourceRecord]
+) -> tuple[TrustedRootRecord, ...]:
+    raw = _list(value, "roots", minimum=1)
+    records: list[TrustedRootRecord] = []
+    seen: set[str] = set()
+    for index, raw_record in enumerate(raw):
+        path = f"roots[{index}]"
+        item = _object(
+            raw_record,
+            path,
+            required={"root_id", "source_id"},
+            optional={"value", "value_digest"},
+        )
+        root_id = _id(item["root_id"], f"{path}.root_id")
+        if root_id in seen:
+            raise SourceLineageError(f"{path}.root_id", "duplicate root ID")
+        seen.add(root_id)
+        source_id = _id(item["source_id"], f"{path}.source_id")
+        if source_id not in source_by_id:
+            raise SourceLineageError(
+                f"{path}.source_id", f"unknown trusted source ID {source_id!r}"
+            )
+        has_value = "value" in item
+        has_digest = "value_digest" in item
+        if has_value == has_digest:
+            raise SourceLineageError(
+                path, "must contain exactly one of value or value_digest"
+            )
+        if has_value:
+            normalized_value = _normalize_json_value(
+                item["value"], f"{path}.value"
+            )
+            value_digest = _sha256(normalized_value)
+        else:
+            normalized_value = None
+            value_digest = _sha256_digest(
+                item["value_digest"], f"{path}.value_digest"
+            )
+        records.append(
+            TrustedRootRecord(
+                root_id,
+                source_id,
+                value_digest,
+                normalized_value,
+            )
+        )
+    return tuple(sorted(records, key=lambda item: item.root_id))
+
+
 def _parse_values(value: object) -> tuple[ValueLineage, ...]:
     raw = _list(value, "values", minimum=1)
     records: list[ValueLineage] = []
@@ -346,7 +503,7 @@ def _parse_values(value: object) -> tuple[ValueLineage, ...]:
                 "value_id",
                 "value",
                 "transformation",
-                "source_ids",
+                "root_id",
                 "parent_value_ids",
             },
         )
@@ -358,26 +515,26 @@ def _parse_values(value: object) -> tuple[ValueLineage, ...]:
         transformation = _enum(
             item["transformation"], Transformation, f"{path}.transformation"
         )
-        source_ids = _id_set(item["source_ids"], f"{path}.source_ids")
+        root_id = _optional_id(item["root_id"], f"{path}.root_id")
         parent_ids = _id_list(
             item["parent_value_ids"], f"{path}.parent_value_ids"
         )
-        if bool(source_ids) == bool(parent_ids):
+        if (root_id is not None) == bool(parent_ids):
             raise SourceLineageError(
                 path,
-                "must reference exactly one of source_ids or parent_value_ids",
+                "must reference exactly one of root_id or parent_value_ids",
             )
-        if source_ids and transformation is not Transformation.EXACT:
+        if root_id is not None and transformation is not Transformation.EXACT:
             raise SourceLineageError(
                 f"{path}.transformation",
-                "source-rooted values must use the exact transformation",
+                "trusted-root values must use the exact transformation",
             )
         records.append(
             ValueLineage(
                 value_id,
                 normalized_value,
                 transformation,
-                source_ids,
+                root_id,
                 parent_ids,
             )
         )
@@ -455,14 +612,21 @@ def _contract_argument(
 
 def _validate_value_graph(
     value_by_id: dict[str, ValueLineage],
-    source_by_id: dict[str, SourceRecord],
+    root_by_id: dict[str, TrustedRootRecord],
 ) -> None:
     for value in value_by_id.values():
-        for source_id in value.source_ids:
-            if source_id not in source_by_id:
+        if value.root_id is not None:
+            try:
+                trusted_root = root_by_id[value.root_id]
+            except KeyError as exc:
                 raise SourceLineageError(
-                    f"values.{value.value_id}.source_ids",
-                    f"unknown source ID {source_id!r}",
+                    f"values.{value.value_id}.root_id",
+                    f"unknown trusted root ID {value.root_id!r}",
+                ) from exc
+            if not trusted_root.matches(value.normalized_value):
+                raise SourceLineageError(
+                    f"values.{value.value_id}.value",
+                    f"does not match trusted root {value.root_id!r}",
                 )
         for parent_id in value.parent_value_ids:
             if parent_id not in value_by_id:
@@ -493,7 +657,6 @@ def _validate_value_graph(
 def _reject_unreferenced_lineage(
     arguments: tuple[ArgumentValue, ...],
     value_by_id: dict[str, ValueLineage],
-    source_by_id: dict[str, SourceRecord],
 ) -> None:
     reachable_values: set[str] = set()
     for argument in arguments:
@@ -502,16 +665,6 @@ def _reject_unreferenced_lineage(
     if unused_values:
         raise SourceLineageError(
             "values", f"unreferenced value ID {unused_values[0]!r}"
-        )
-    reachable_sources = {
-        source_id
-        for value_id in reachable_values
-        for source_id in value_by_id[value_id].source_ids
-    }
-    unused_sources = sorted(set(source_by_id).difference(reachable_sources))
-    if unused_sources:
-        raise SourceLineageError(
-            "sources", f"unreferenced source ID {unused_sources[0]!r}"
         )
 
 
@@ -581,6 +734,7 @@ def _object(
     path: str,
     *,
     required: set[str],
+    optional: set[str] | None = None,
 ) -> dict[str, object]:
     if type(value) is not dict:
         raise SourceLineageError(path, "must be an object")
@@ -590,7 +744,8 @@ def _object(
             raise SourceLineageError(path, "object keys must be strings")
         _safe_string(key, path)
     typed = cast(dict[str, object], mapping)
-    unknown = sorted(set(typed).difference(required))
+    allowed = required | (optional or set())
+    unknown = sorted(set(typed).difference(allowed))
     if unknown:
         raise SourceLineageError(f"{path}.{unknown[0]}", "unknown field")
     missing = sorted(required.difference(typed))
@@ -627,6 +782,12 @@ def _id(value: object, path: str) -> str:
     if not _ID.fullmatch(result):
         raise SourceLineageError(path, "must be a stable lowercase ASCII ID")
     return result
+
+
+def _optional_id(value: object, path: str) -> str | None:
+    if value is None:
+        return None
+    return _id(value, path)
 
 
 def _version(value: object, path: str) -> str:
@@ -673,11 +834,6 @@ def _scope_set(value: object, path: str) -> tuple[str, ...]:
     return tuple(sorted(result))
 
 
-def _id_set(value: object, path: str) -> tuple[str, ...]:
-    result = _id_items(value, path)
-    return tuple(sorted(result))
-
-
 def _id_list(value: object, path: str) -> tuple[str, ...]:
     return tuple(_id_items(value, path))
 
@@ -700,6 +856,15 @@ def _reject_duplicates(values: list[str], path: str) -> None:
 def _normalize_json_value(value: object, path: str) -> str:
     normalized = _validated_json_value(value, path)
     return _canonical_json(normalized)
+
+
+def _sha256_digest(value: object, path: str) -> str:
+    digest = _string(value, path)
+    if not _SHA256.fullmatch(digest):
+        raise SourceLineageError(
+            path, "must be 64 lowercase SHA-256 hex characters"
+        )
+    return digest
 
 
 def _validated_json_value(value: object, path: str) -> object:
