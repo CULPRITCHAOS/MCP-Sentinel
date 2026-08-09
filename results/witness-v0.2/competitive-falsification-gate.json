@@ -1,0 +1,171 @@
+{
+  "schema_version": "witness-competitive-falsification-gate-v0.2",
+  "linear_issue": "WIT-12",
+  "starting_commit": "ab058aa7b82a1017a839e58bb8380d5e4040c85d",
+  "evaluated_at": "2026-08-02",
+  "status": "draft_independent_review_required",
+  "decision": "CONTINUE_NARROWLY",
+  "claims_matrix_updated": false,
+  "downstream_started": [],
+  "candidates": [
+    {
+      "name": "PACT",
+      "version": "arXiv:2605.11039v1",
+      "source": "https://arxiv.org/abs/2605.11039v1",
+      "license": "arXiv perpetual non-exclusive distribution license",
+      "artifact_available": false,
+      "official_proof": {
+        "status": "NOT_RUN_ARTIFACT_UNAVAILABLE",
+        "reason": "The paper says an anonymized supplement exists, but the public arXiv record exposes no supplement or code URL."
+      },
+      "coverage": {
+        "P01_P04": "SUPPORTED_PAPER_ONLY",
+        "P05_P06": "SUPPORTED_PAPER_ONLY",
+        "P08": "OUT_OF_SCOPE",
+        "P12": "OUT_OF_SCOPE",
+        "fail_closed_external_evidence": "NOT_APPLICABLE"
+      }
+    },
+    {
+      "name": "MVAR",
+      "version": "v1.7.0",
+      "commit": "379d9fe800349f592b769b9445eab3be1202f9d7",
+      "source": "https://github.com/mvar-security/mvar",
+      "license": "Apache-2.0",
+      "official_proof": {
+        "status": "PASS_WITH_REPRODUCIBILITY_DEFECT",
+        "quick_verify": {
+          "command": "bash scripts/quick-verify.sh",
+          "unit_passed": 410,
+          "unit_skipped": 3,
+          "red_team_passed": 7,
+          "attack_blocked": 50,
+          "attack_total": 50,
+          "benign_passed": 200,
+          "benign_total": 200,
+          "false_blocks": 0
+        },
+        "repro_pack": {
+          "command": "bash scripts/repro-validation-pack.sh",
+          "status": "PASS",
+          "artifact_utc": "20260803T042854Z",
+          "checksums": {
+            "launch_gate.log": "a602f1b0cc33c118a66ec797eaa9a1fbf63bbbdf9fe40ffff43b2fb3289ac0b8",
+            "sink_coverage.log": "50220a61a9ec5a44f70ce542bea7079a2bbebb547372ccc17497583e89ee0013",
+            "validation_summary.json": "fe68205a9fa02e1a0725a952b9210530933c0cdac5d4dbbad2061d30ad70c1cd"
+          },
+          "preserved_inconsistency": "validation summary reports full_suite_passed=7 while console proof reports 410 passed, 3 skipped"
+        },
+        "final_witness_step": {
+          "command": "mvar-verify-witness data/mvar_decisions.jsonl --require-chain",
+          "status": "FAIL_MISSING_INPUT",
+          "missing": "data/mvar_decisions.jsonl"
+        }
+      },
+      "preserved_setup_failures": [
+        "Windows checkout CRLF made scripts/quick-verify.sh invalid in Bash",
+        "Linux-native checkout initially lacked ensurepip/python3.14-venv"
+      ],
+      "coverage": {
+        "P01_P04": "UNSUPPORTED_WHOLE_REQUEST_PROVENANCE",
+        "P05_P06": "UNSUPPORTED_WHOLE_REQUEST_PROVENANCE",
+        "P08": "UNSUPPORTED_NO_EXTERNAL_EFFECT_OBSERVER",
+        "P12": "UNSUPPORTED_NO_EXTERNAL_EFFECT_OBSERVER",
+        "fail_closed_external_evidence": "UNSUPPORTED"
+      }
+    },
+    {
+      "name": "Pipelock",
+      "version": "v3.3.0",
+      "commit": "de451af38bcd46e1143682fd2200ebf045cf8647",
+      "source": "https://github.com/luckyPipewrench/pipelock",
+      "license": "Apache-2.0 core; ELv2 enterprise excluded",
+      "official_proof": {
+        "command": "go test -race -count=1 ./...",
+        "toolchain": "go1.25.7 linux/amd64",
+        "user": "unprivileged disposable WSL user",
+        "runtime_seconds": 470.1,
+        "status": "FAIL_ONE_DISPLAYED_PACKAGE",
+        "failure": "internal/sandbox TestLaunchStandalone_CustomPolicy: sandbox allow_read path does not exist: /etc/pki/",
+        "notable_passes": [
+          "internal/mcp",
+          "internal/proxy",
+          "internal/receipt",
+          "internal/recorder",
+          "internal/evidence",
+          "internal/scanner",
+          "internal/signing"
+        ]
+      },
+      "preserved_setup_failures": [
+        "race build initially lacked C standard library headers",
+        "root run produced permission-sensitive false failures because root bypasses read-only modes"
+      ],
+      "ordinary_presets": {
+        "strict": {
+          "sandbox_enabled": false,
+          "sandbox_source_state": "commented",
+          "flight_recorder_enabled": true,
+          "require_receipts": false,
+          "recorder_operational_without_dir_and_key": false
+        },
+        "balanced": {
+          "sandbox_enabled": false,
+          "sandbox_source_state": "commented",
+          "flight_recorder_enabled": true,
+          "require_receipts": false,
+          "recorder_operational_without_dir_and_key": false
+        }
+      },
+      "coverage": {
+        "P01_P04": "UNSUPPORTED_NO_ARGUMENT_SOURCE_AUTHORITY",
+        "P05_P06": "UNSUPPORTED_NO_ARGUMENT_SOURCE_AUTHORITY",
+        "P08": "UNSUPPORTED_BY_ORDINARY_PRESET_SANDBOX_DISABLED",
+        "P12": "PARTIAL_MEDIATED_EGRESS_ONLY_WITHOUT_SANDBOX",
+        "fail_closed_external_evidence": "PARTIAL_CAPABILITY_DISABLED_BY_PRESET"
+      }
+    }
+  ],
+  "ordinary_compositions": [
+    {
+      "name": "PACT + Pipelock",
+      "status": "NOT_RUN",
+      "reason": "PACT executable artifact unavailable; no supported shared action/evidence binding documented."
+    },
+    {
+      "name": "MVAR + Pipelock",
+      "status": "PARTIAL_NOT_B7_EQUIVALENT",
+      "reason": "Whole-request provenance remains; published Pipelock presets do not enable sandbox or fail-closed allow receipts; no shared authorization-to-effect completeness binding."
+    }
+  ],
+  "repository_validation": {
+    "preregistration_v0_1": "PASS",
+    "preregistration_v0_2": "PASS",
+    "unit_suite": {
+      "status": "PASS_AFTER_DECLARED_PROJECT_INSTALL",
+      "passed": 178,
+      "warnings": 1,
+      "preserved_initial_failure": "Collection failed because requirements.txt omits PyYAML, which is declared in pyproject.toml."
+    },
+    "diff_check": "PASS",
+    "ruff": {
+      "status": "FAIL_BASELINE",
+      "findings": 44,
+      "scope": "pre-existing Python files outside the report-only diff"
+    },
+    "mypy": {
+      "status": "FAIL_BASELINE",
+      "errors": 127,
+      "files": 12,
+      "scope": "pre-existing Python files outside the report-only diff"
+    }
+  },
+  "locked_gate": {
+    "complete_ordinary_coverage_found": false,
+    "remaining_gaps": [
+      "per-argument host-issued source authority",
+      "independent observation of unmediated same-schema effects",
+      "fail-closed authorization-to-effect evidence completeness binding"
+    ]
+  }
+}
